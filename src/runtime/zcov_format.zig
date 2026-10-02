@@ -173,14 +173,44 @@ pub fn read(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ReadErro
     };
 }
 
+/// A scratch .zcov file for one test: an isolated directory under
+/// `std.testing.tmpDir`'s `.zig-cache/tmp`, plus the sentinel-terminated
+/// absolute path that libc's `fopen` needs (it cannot take a directory handle).
+/// These tests used to share fixed `/tmp` names, which collided between
+/// concurrent runs and were left behind afterwards.
+const TmpZcov = struct {
+    tmp: std.testing.TmpDir,
+    path: [:0]u8,
+
+    fn init(io: std.Io, name: []const u8) !TmpZcov {
+        var tmp = std.testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        // realpath() requires the whole path to exist, and `write` truncates
+        // whatever is there, so an empty placeholder is enough.
+        var placeholder = try tmp.dir.createFile(io, name, .{});
+        placeholder.close(io);
+        return .{
+            .tmp = tmp,
+            .path = try tmp.dir.realPathFileAlloc(io, name, std.testing.allocator),
+        };
+    }
+
+    fn deinit(self: *TmpZcov) void {
+        std.testing.allocator.free(self.path);
+        self.tmp.cleanup();
+    }
+};
+
 test "zcov_format write produces valid header bytes" {
-    const path: [:0]const u8 = "/tmp/zcov-unit-hdr.zcov";
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var out = try TmpZcov.init(io, "hdr.zcov");
+    defer out.deinit();
     const pcs = [_]u64{ 0x1000, 0x2000, 0x3000 };
     const counts = [_]u8{ 1, 0, 7 };
     const bin = "/usr/bin/test-bin";
-    try write(path, -256, bin, &pcs, &counts);
+    try write(out.path, -256, bin, &pcs, &counts);
 
-    const f = fopen(path.ptr, "rb") orelse return error.TestFailed;
+    const f = fopen(out.path.ptr, "rb") orelse return error.TestFailed;
     defer _ = fclose(f);
 
     var hdr: Header = undefined;
@@ -193,10 +223,12 @@ test "zcov_format write produces valid header bytes" {
 }
 
 test "zcov_format write empty pcs produces zero num_pcs in header" {
-    const path: [:0]const u8 = "/tmp/zcov-unit-empty.zcov";
-    try write(path, 0, "/bin/empty", &.{}, &.{});
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var out = try TmpZcov.init(io, "empty.zcov");
+    defer out.deinit();
+    try write(out.path, 0, "/bin/empty", &.{}, &.{});
 
-    const f = fopen(path.ptr, "rb") orelse return error.TestFailed;
+    const f = fopen(out.path.ptr, "rb") orelse return error.TestFailed;
     defer _ = fclose(f);
 
     var hdr: Header = undefined;
@@ -206,28 +238,32 @@ test "zcov_format write empty pcs produces zero num_pcs in header" {
 }
 
 test "zcov_format write returns error for bin_path exceeding u16 max" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var out = try TmpZcov.init(io, "toolong.zcov");
+    defer out.deinit();
     const alloc = std.testing.allocator;
     const too_long = try alloc.alloc(u8, std.math.maxInt(u16) + 1);
     defer alloc.free(too_long);
     @memset(too_long, 'x');
     try std.testing.expectError(
         error.BinPathTooLong,
-        write("/tmp/zcov-unit-toolong.zcov", 0, too_long, &.{}, &.{}),
+        write(out.path, 0, too_long, &.{}, &.{}),
     );
 }
 
 test "zcov_format round-trip: read back matches what was written" {
     const alloc = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
-    const path: [:0]const u8 = "/tmp/zcov-unit-roundtrip.zcov";
+    var out = try TmpZcov.init(io, "roundtrip.zcov");
+    defer out.deinit();
     const pcs_in = [_]u64{ 0xdeadbeef, 0xcafebabe, 0x12345678 };
     const counts_in = [_]u8{ 3, 0, 255 };
     const bin_in = "/usr/bin/mytest";
     const slide_in: i64 = -4096;
 
-    try write(path, slide_in, bin_in, &pcs_in, &counts_in);
+    try write(out.path, slide_in, bin_in, &pcs_in, &counts_in);
 
-    var data = try read(alloc, io, path);
+    var data = try read(alloc, io, out.path);
     defer data.deinit();
 
     try std.testing.expectEqual(slide_in, data.slide);
@@ -241,7 +277,8 @@ test "zcov_format round-trip: read back matches what was written" {
 test "zcov_format read rejects bad magic" {
     const alloc = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
-    const path: [:0]const u8 = "/tmp/zcov-unit-badmagic.zcov";
+    var out = try TmpZcov.init(io, "badmagic.zcov");
+    defer out.deinit();
 
     var hdr = Header{
         .magic = .{ 'B', 'A', 'D', '!' },
@@ -250,17 +287,18 @@ test "zcov_format read rejects bad magic" {
         .num_pcs = 0,
         .bin_path_len = 0,
     };
-    const f = fopen(path.ptr, "wb") orelse return error.TestFailed;
+    const f = fopen(out.path.ptr, "wb") orelse return error.TestFailed;
     _ = fwrite(&hdr, @sizeOf(Header), 1, f);
     _ = fclose(f);
 
-    try std.testing.expectError(error.InvalidMagic, read(alloc, io, path));
+    try std.testing.expectError(error.InvalidMagic, read(alloc, io, out.path));
 }
 
 test "zcov_format read rejects unsupported version" {
     const alloc = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
-    const path: [:0]const u8 = "/tmp/zcov-unit-badver.zcov";
+    var out = try TmpZcov.init(io, "badver.zcov");
+    defer out.deinit();
 
     var hdr = Header{
         .magic = magic,
@@ -269,37 +307,39 @@ test "zcov_format read rejects unsupported version" {
         .num_pcs = 0,
         .bin_path_len = 0,
     };
-    const f = fopen(path.ptr, "wb") orelse return error.TestFailed;
+    const f = fopen(out.path.ptr, "wb") orelse return error.TestFailed;
     _ = fwrite(&hdr, @sizeOf(Header), 1, f);
     _ = fclose(f);
 
-    try std.testing.expectError(error.UnsupportedVersion, read(alloc, io, path));
+    try std.testing.expectError(error.UnsupportedVersion, read(alloc, io, out.path));
 }
 
 test "zcov_format read returns EndOfStream on truncated file" {
     const alloc = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
-    const path: [:0]const u8 = "/tmp/zcov-unit-truncated.zcov";
+    var out = try TmpZcov.init(io, "truncated.zcov");
+    defer out.deinit();
 
     // Write only 2 bytes — a full header requires @sizeOf(Header) bytes.
-    const f = fopen(path.ptr, "wb") orelse return error.TestFailed;
+    const f = fopen(out.path.ptr, "wb") orelse return error.TestFailed;
     const short = [_]u8{ 'Z', 'C' };
     _ = fwrite(&short, 1, short.len, f);
     _ = fclose(f);
 
-    try std.testing.expectError(error.EndOfStream, read(alloc, io, path));
+    try std.testing.expectError(error.EndOfStream, read(alloc, io, out.path));
 }
 
 test "zcov_format round-trip preserves per-block counts" {
     const alloc = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
-    const path: [:0]const u8 = "/tmp/zcov-unit-counts.zcov";
+    var out = try TmpZcov.init(io, "counts.zcov");
+    defer out.deinit();
     const pcs_in = [_]u64{ 0x10, 0x20, 0x30, 0x40 };
     // A zero count is a real miss and must survive the round trip.
     const counts_in = [_]u8{ 5, 0, 0, 255 };
 
-    try write(path, 0, "/bin/x", &pcs_in, &counts_in);
-    var data = try read(alloc, io, path);
+    try write(out.path, 0, "/bin/x", &pcs_in, &counts_in);
+    var data = try read(alloc, io, out.path);
     defer data.deinit();
 
     try std.testing.expectEqualSlices(u8, &counts_in, data.counts);
@@ -309,12 +349,13 @@ test "zcov_format round-trip preserves per-block counts" {
 test "zcov_format hitPcs returns only the blocks that executed" {
     const alloc = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
-    const path: [:0]const u8 = "/tmp/zcov-unit-hitpcs.zcov";
+    var out = try TmpZcov.init(io, "hitpcs.zcov");
+    defer out.deinit();
     const pcs_in = [_]u64{ 0x10, 0x20, 0x30, 0x40 };
     const counts_in = [_]u8{ 1, 0, 9, 0 };
 
-    try write(path, 0, "/bin/x", &pcs_in, &counts_in);
-    var data = try read(alloc, io, path);
+    try write(out.path, 0, "/bin/x", &pcs_in, &counts_in);
+    var data = try read(alloc, io, out.path);
     defer data.deinit();
 
     const hits = try data.hitPcs(alloc);
@@ -323,10 +364,13 @@ test "zcov_format hitPcs returns only the blocks that executed" {
 }
 
 test "zcov_format write rejects mismatched pcs and counts" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var out = try TmpZcov.init(io, "mismatch.zcov");
+    defer out.deinit();
     const pcs = [_]u64{ 1, 2 };
     const counts = [_]u8{1};
     try std.testing.expectError(
         error.CountMismatch,
-        write("/tmp/zcov-unit-mismatch.zcov", 0, "/bin/x", &pcs, &counts),
+        write(out.path, 0, "/bin/x", &pcs, &counts),
     );
 }

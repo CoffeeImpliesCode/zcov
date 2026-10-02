@@ -19,6 +19,7 @@ const build_options = @import("build_options");
 const zcov_format = @import("runtime/zcov_format.zig");
 const resolver = @import("dwarf/resolver.zig");
 const coverage_mod = @import("coverage.zig");
+const tmp_dir = @import("tmp_dir.zig");
 
 // Expected line numbers in test/sample/src/math.zig — must match the file exactly.
 const LINE_ADD: u32 = 2; // return a + b;
@@ -35,14 +36,11 @@ pub fn main(init: std.process.Init) !void {
 
     var step: u32 = 0;
 
-    // Create a temp dir to collect .zcov output from the sample binary.
-    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const pid = std.c.getpid();
-    const zcov_dir = std.fmt.bufPrint(&tmp_buf, "/tmp/zig-cov-itest-{d}", .{pid}) catch unreachable;
-    std.Io.Dir.createDirAbsolute(io, zcov_dir, .default_dir) catch |e| switch (e) {
-        error.PathAlreadyExists => {},
-        else => return e,
-    };
+    // Create a temp dir to collect .zcov output from the sample binary, and the
+    // cold sample build cache underneath it. Placed by the same policy the CLI
+    // uses, so a run routed at $TMPDIR does not land on a small shared /tmp.
+    var tmp_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const zcov_dir = try tmp_dir.createRunDir(io, init.environ_map, "zig-cov-itest", &tmp_buf);
     defer std.Io.Dir.deleteTree(.cwd(), io, zcov_dir) catch {};
 
     // Step 1: build and run the sample project with coverage instrumentation.
@@ -124,8 +122,12 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("PASS [{d}] math.zig:{d} (subtract) is correctly absent\n", .{ step, LINE_SUBTRACT });
 
     // Step 6: hit counts must be positive (not just present).
-    const add_hits = line_map.get(LINE_ADD) orelse { fail("add absent — unreachable after step 4"); };
-    const mul_hits = line_map.get(LINE_MULTIPLY) orelse { fail("multiply absent — unreachable after step 5"); };
+    const add_hits = line_map.get(LINE_ADD) orelse {
+        fail("add absent — unreachable after step 4");
+    };
+    const mul_hits = line_map.get(LINE_MULTIPLY) orelse {
+        fail("multiply absent — unreachable after step 5");
+    };
     check(add_hits >= 1, "add hit count must be >= 1");
     check(mul_hits >= 1, "multiply hit count must be >= 1");
     step += 1;
@@ -163,10 +165,16 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    const merged_key = findFile(&merged, "src/math.zig") orelse { fail("math.zig absent from merged coverage"); };
+    const merged_key = findFile(&merged, "src/math.zig") orelse {
+        fail("math.zig absent from merged coverage");
+    };
     const merged_map = merged.file_map.get(merged_key).?;
-    const merged_add = merged_map.get(LINE_ADD) orelse { fail("add absent after merge"); };
-    const merged_mul = merged_map.get(LINE_MULTIPLY) orelse { fail("multiply absent after merge"); };
+    const merged_add = merged_map.get(LINE_ADD) orelse {
+        fail("add absent after merge");
+    };
+    const merged_mul = merged_map.get(LINE_MULTIPLY) orelse {
+        fail("multiply absent after merge");
+    };
     check(merged_add >= 2, "add hit count must be >= 2 after two runs");
     check(merged_mul >= 2, "multiply hit count must be >= 2 after two runs");
     step += 1;
@@ -191,14 +199,20 @@ pub fn main(init: std.process.Init) !void {
             try cov.recordHit(loc.file, loc.line);
         }
     }
-    const cov_key = findFile(&cov, "src/math.zig") orelse { fail("math.zig absent from analyze coverage"); };
+    const cov_key = findFile(&cov, "src/math.zig") orelse {
+        fail("math.zig absent from analyze coverage");
+    };
     const cov_map = cov.file_map.get(cov_key).?;
     const cov_sub = cov_map.get(LINE_SUBTRACT) orelse {
         fail("subtract must be a coverable MISS, but is absent — coverable enumeration failed");
     };
     check(cov_sub == 0, "subtract must be a miss (coverable, hit_count 0)");
-    const cov_add = cov_map.get(LINE_ADD) orelse { fail("add absent from analyze coverage"); };
-    const cov_mul = cov_map.get(LINE_MULTIPLY) orelse { fail("multiply absent from analyze coverage"); };
+    const cov_add = cov_map.get(LINE_ADD) orelse {
+        fail("add absent from analyze coverage");
+    };
+    const cov_mul = cov_map.get(LINE_MULTIPLY) orelse {
+        fail("multiply absent from analyze coverage");
+    };
     check(cov_add >= 1, "add must be hit in analyze coverage");
     check(cov_mul >= 1, "multiply must be hit in analyze coverage");
     step += 1;

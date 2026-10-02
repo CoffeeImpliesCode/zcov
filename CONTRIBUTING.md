@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-Zig nightly (`0.16.0-dev` or later). Check with:
+Zig nightly at or above the minimum in `build.zig.zon` (`0.17.0-dev.1509+bb296ab9b`). Check with:
 
 ```sh
 zig version
@@ -14,7 +14,7 @@ zig version
 git clone https://github.com/ericsssan/zcov
 cd zcov
 zig build
-# Produces: zig-out/bin/zig-cov  and  zig-out/lib/libzig-cov-rt.a
+# Produces: zig-out/bin/zig-cov and zig-out/lib/zig-cov-rt.o
 ```
 
 ## Testing
@@ -32,6 +32,7 @@ All tests must pass before submitting a PR. New behaviour must be covered by tes
 src/
 ├── main.zig                  CLI entry point
 ├── build_orchestrator.zig    Invokes zig build test with coverage flags
+├── tmp_dir.zig               $TMPDIR-based scratch directory placement
 ├── coverage.zig              Unified coverage data model
 ├── dwarf/
 │   └── resolver.zig          Batch PC → file:line resolver (ELF + Mach-O)

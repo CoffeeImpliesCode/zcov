@@ -9,13 +9,14 @@
 //!  5. Return paths to the collected data files and the test binary.
 
 const std = @import("std");
+const tmp_dir = @import("tmp_dir.zig");
 
 pub const OrchestratorError = error{
     ZigNotFound,
     BuildFailed,
     NoCoverageFiles,
     RuntimeNotFound,
-} || std.mem.Allocator.Error || std.process.SpawnError || std.process.RunError ||
+} || tmp_dir.Error || std.mem.Allocator.Error || std.process.SpawnError || std.process.RunError ||
     std.Io.File.OpenError || std.Io.Dir.OpenError;
 
 pub const RunResult = struct {
@@ -54,7 +55,9 @@ pub fn run(opts: Options) OrchestratorError!RunResult {
 
     // Create a temporary directory for .zcov output.
     var tmp_dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const zcov_dir = try makeTmpDir(io, &tmp_dir_buf);
+    const zcov_dir = try tmp_dir.createRunDir(io, opts.parent_environ, "zig-cov", &tmp_dir_buf);
+    // Only failures clean up: a successful run leaves its directory, and the
+    // .zcov files in it, for `zig-cov report` to read afterwards.
     errdefer removeTmpDir(io, zcov_dir);
 
     // Find the zig executable.
@@ -165,16 +168,6 @@ fn findRuntime(
         .{self_dir},
     );
     return error.RuntimeNotFound;
-}
-
-fn makeTmpDir(io: std.Io, buf: []u8) OrchestratorError![]const u8 {
-    const pid = std.c.getpid();
-    const path = std.fmt.bufPrint(buf, "/tmp/zig-cov-{d}", .{pid}) catch return error.ZigNotFound;
-    std.Io.Dir.createDirAbsolute(io, path, .default_dir) catch |e| switch (e) {
-        error.PathAlreadyExists => {},
-        else => return error.BuildFailed,
-    };
-    return path;
 }
 
 fn removeTmpDir(io: std.Io, path: []const u8) void {

@@ -125,6 +125,27 @@ zig-cov test --fail-under=80
 zig-cov test -- --summary all
 ```
 
+### Scratch directory
+
+Each `zig-cov test` run creates `$TMPDIR/zig-cov-<pid>/`, holding both the
+collected `.zcov` files and a private cold build cache for the project under
+test. The cache is forced cold on purpose — Zig caches the test *run*, so a
+warm cache would be skipped and the run would report no coverage at all — but
+it does make the directory hundreds of megabytes on a real project. On a host
+with a small shared `/tmp`, point it somewhere with room:
+
+```sh
+TMPDIR=/mnt/big-scratch/tmp zig-cov test
+```
+
+`TMPDIR` must name an existing absolute directory. It is read from zig-cov's
+startup environment and passed to the child build. Unset or empty values use
+the POSIX `/tmp` default; a relative or unavailable explicit path fails rather
+than silently falling back.
+
+A failed run deletes its directory. A successful one keeps it, because those
+`.zcov` files are what a later `zig-cov report` reads.
+
 ### Generate a report from existing .zcov files
 
 ```sh
@@ -318,8 +339,8 @@ zig build bench
 
 - **No Windows support yet.** Three concrete gaps need fixing before Windows works:
   1. `std.debug.Info.load` only handles `.elf` and `.macho` — `.coff` (Windows PE) hits an `UnsupportedDebugInfo` error at runtime (`src/dwarf/resolver.zig`)
-  2. The temp directory is hardcoded to `/tmp/zig-cov-{pid}` — Windows has no `/tmp/` (`src/build_orchestrator.zig:128`)
-  3. Finding the Zig executable uses `which zig` — Windows uses `where` instead (`src/build_orchestrator.zig:143`)
+  2. Scratch placement honours `$TMPDIR`, but the fallback is still the POSIX `/tmp`, which does not exist on Windows (`src/tmp_dir.zig`)
+  3. Finding the Zig executable uses `which zig` — Windows uses `where` instead (`findZig` in `src/build_orchestrator.zig`)
 
   Planned for v1.0.
 - **Lazy compilation.** Zig only compiles functions that are referenced. Unreferenced functions produce no object code and are invisible to all coverage tools, not just zig-cov.
@@ -330,6 +351,7 @@ zig build bench
 src/
 ├── main.zig                  CLI entry point
 ├── build_orchestrator.zig    Invokes zig build test with coverage flags
+├── tmp_dir.zig               $TMPDIR-based scratch directory placement
 ├── coverage.zig              Unified coverage data model
 ├── dwarf/
 │   └── resolver.zig          PC → file:line resolver, block expansion and
