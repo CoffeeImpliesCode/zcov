@@ -44,9 +44,41 @@ pub fn build(b: *std.Build) void {
     // Run step for the CLI
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    run_cmd.addPassthruArgs();
+    // Passthrough of trailing args after `--`. `addPassthruArgs` is absent from
+    // std.Build.Step.Run on Zig 0.16 and present again on the 0.17 master this
+    // project tracks; the comptime guard keeps build.zig loadable on both, which
+    // is a precondition for the `docs` step below existing at all.
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs();
     const run_step = b.step("run", "Run zig-cov");
     run_step.dependOn(&run_cmd.step);
+
+    // Autodoc bundle (run with: zig build docs). The documented root is the CLI
+    // root, src/main.zig: it is the tool's public module, and every other file
+    // (coverage model, DWARF resolver, report writers, sancov runtime) is
+    // reachable from it by @import, so autodoc documents the whole tool.
+    //
+    // An object compile, not a plain `zig build-obj src/main.zig`: build-obj has
+    // no package manager and cannot turn link_libc on, and this root reaches
+    // libc transitively — std.c.getpid() from build_orchestrator.zig and
+    // fopen/fread from runtime/zcov_format.zig. Without it the compile dies on
+    // "dependency on libc must be explicitly specified in the build command".
+    // The root module below mirrors the exe's configuration, which is what
+    // makes the docs root analyze standalone.
+    const docs_obj = b.addObject(.{
+        .name = "zig-cov-docs",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    const docs_step = b.step("docs", "Build the autodoc bundle into zig-out/docs");
+    docs_step.dependOn(&b.addInstallDirectory(.{
+        .source_dir = docs_obj.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "docs",
+    }).step);
 
     // Tests for zig-cov itself (main + report + coverage model).
     // link_libc = true is required because zcov_format.zig (imported transitively)
@@ -99,7 +131,7 @@ pub fn build(b: *std.Build) void {
     // that the full pipeline (sancov → .zcov → DWARF → report) is correct.
     const itest_options = b.addOptions();
     itest_options.addOptionPath("rt_lib_path", rt_obj.getEmittedBin());
-    itest_options.addOption([]const u8, "sample_dir", b.root.joinString(b.graph.arena, "test/sample") catch @panic("OOM"));
+    itest_options.addOption([]const u8, "sample_dir", sampleDir(b));
     itest_options.addOption([]const u8, "zig_exe", b.graph.zig_exe);
 
     const itest_exe = b.addExecutable(.{
@@ -132,6 +164,16 @@ pub fn build(b: *std.Build) void {
     const run_bench = b.addRunArtifact(bench_exe);
     const bench_step = b.step("bench", "Run synthetic performance benchmarks");
     bench_step.dependOn(&run_bench.step);
+}
+
+/// Absolute path of the integration-test sample project. 0.17 exposes the build
+/// root as `b.root` with `joinString`; 0.16 exposes `b.pathFromRoot`. Both
+/// resolve to <build root>/test/sample, so the branch is a pure API shim.
+fn sampleDir(b: *std.Build) []const u8 {
+    if (@hasField(std.Build, "root")) {
+        return b.root.joinString(b.graph.arena, "test/sample") catch @panic("OOM");
+    }
+    return b.pathFromRoot("test/sample");
 }
 
 /// Apply zig-cov instrumentation to a test binary — the same three settings the
